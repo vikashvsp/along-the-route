@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Uber - Ride Booking Clone</title>
+  <!-- Google Fonts - Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- Local Styles -->
+  <link rel="stylesheet" href="/index.css">
+</head>
+<body>
+  <div id="app-container">
+    <!-- Map Container -->
+    <div id="map-container">
+      <div id="map"></div>
+      
+      <!-- Map Controls & Status -->
+      <div class="map-controls">
+        <button id="locate-me-btn" class="map-btn" title="My Location">
+          <i data-lucide="crosshair"></i>
+        </button>
+      </div>
+
+      <!-- Provider Badge -->
+      <div id="provider-badge" class="provider-badge">
+        <span class="dot"></span>
+        <span id="provider-text">Initializing map...</span>
+      </div>
+    </div>
+
+    <!-- Interface Panel -->
+    <div class="side-panel">
+      <!-- Brand Header -->
+      <header class="brand-header">
+        <div class="logo">Uber</div>
+        <div class="nav-links">
+          <span class="active">Ride</span>
+        </div>
+      </header>
+
+      <!-- Panel Content Container -->
+      <div class="panel-content">
+        
+        <!-- STEP 1: Search Panel -->
+        <div id="panel-search" class="panel-step active">
+          <h2 class="step-title">Where can we take you?</h2>
+          
+          <div class="search-inputs">
+            <!-- Pickup Input Group -->
+            <div class="input-group">
+              <div class="input-icon-container">
+                <span class="pickup-dot"></span>
+              </div>
+              <div class="input-wrapper">
+                <input type="text" id="pickup-input" placeholder="Enter pickup location..." autocomplete="off">
+                <button class="clear-btn" id="clear-pickup-btn"><i data-lucide="x"></i></button>
+              </div>
+              <div id="pickup-suggestions" class="suggestions-list hidden"></div>
+            </div>
+
+            <!-- Path Line -->
+            <div class="route-connector-line"></div>
+
+            <!-- Destination Input Group -->
+            <div class="input-group">
+              <div class="input-icon-container">
+                <span class="destination-square"></span>
+              </div>
+              <div class="input-wrapper">
+                <input type="text" id="destination-input" placeholder="Where to?" autocomplete="off">
+                <button class="clear-btn" id="clear-dest-btn"><i data-lucide="x"></i></button>
+              </div>
+              <div id="destination-suggestions" class="suggestions-list hidden"></div>
+            </div>
+          </div>
+
+          <div class="quick-destinations">
+            <h3>Recent Places</h3>
+            <div class="quick-item" data-lat="12.9754" data-lng="77.6062" data-name="MG Road Metro Station, Bengaluru">
+              <i data-lucide="clock"></i>
+              <div class="quick-details">
+                <p class="quick-title">MG Road Metro Station</p>
+                <p class="quick-subtitle">MG Road, Bengaluru, Karnataka, India</p>
+              </div>
+            </div>
+            <div class="quick-item" data-lat="12.9507" data-lng="77.5844" data-name="Lalbagh Botanical Garden, Bengaluru">
+              <i data-lucide="clock"></i>
+              <div class="quick-details">
+                <p class="quick-title">Lalbagh Botanical Garden</p>
+                <p class="quick-subtitle">Mavalli, Bengaluru, Karnataka</p>
+              </div>
+            </div>
+            <div class="quick-item" data-lat="12.9719" data-lng="77.6412" data-name="Indiranagar 100 Feet Rd, Bengaluru">
+              <i data-lucide="clock"></i>
+              <div class="quick-details">
+                <p class="quick-title">Indiranagar 100 Feet Rd</p>
+                <p class="quick-subtitle">Indiranagar, Bengaluru, Karnataka</p>
+              </div>
+            </div>
+            <div class="quick-item" data-lat="13.1986" data-lng="77.7066" data-name="Kempegowda International Airport (BLR)">
+              <i data-lucide="plane"></i>
+              <div class="quick-details">
+                <p class="quick-title">Kempegowda Intl Airport (BLR)</p>
+                <p class="quick-subtitle">Devanahalli, Bengaluru, Karnataka, India</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- STEP 2: Ride Selection Panel -->
+        <div id="panel-select-ride" class="panel-step">
+          <div class="panel-back-header">
+            <button id="back-to-search" class="back-btn">
+              <i data-lucide="arrow-left"></i>
+            </button>
+            <span class="panel-header-title">Choose a ride</span>
+          </div>
+
+          <div class="route-summary">
+            <div class="route-summary-item">
+              <span class="summary-label">Distance</span>
+              <span id="summary-distance" class="summary-val">-- km</span>
+            </div>
+            <div class="route-vertical-divider"></div>
+            <div class="route-summary-item">
+              <span class="summary-label">Duration</span>
+              <span id="summary-duration" class="summary-val">-- min</span>
+            </div>
+          </div>
+
+          <div class="ride-options-list" id="ride-options-container">
+            <!-- Dynamic Injection of Ride Cards -->
+          </div>
+
+          <div class="payment-selection-row">
+            <div class="pay-method">
+              <i data-lucide="credit-card"></i>
+              <span id="selected-payment-method">Personal Wallet (Personal)</span>
+              <i data-lucide="chevron-right" class="chevron"></i>
+            </div>
+          </div>
+
+          <!-- Slide to Confirm Booking Button -->
+          <div class="confirm-container">
+            <div class="slide-button-track" id="slide-button-track">
+              <div class="slide-button-handle" id="slide-button-handle">
+                <i data-lucide="chevrons-right"></i>
+              </div>
+              <span class="slide-button-text">Slide to Confirm Ride</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- STEP 3: Matching Driver Panel -->
+        <div id="panel-matching" class="panel-step">
+          <div class="matching-container">
+            <div class="pulse-loader">
+              <div class="pulse-ring ring-1"></div>
+              <div class="pulse-ring ring-2"></div>
+              <div class="pulse-ring ring-3"></div>
+              <i data-lucide="search" class="search-icon"></i>
+            </div>
+            <h3 class="matching-title">Finding your ride</h3>
+            <p class="matching-subtitle" id="matching-status">Connecting to drivers nearby...</p>
+            
+            <div class="matching-progress-bar">
+              <div class="matching-progress-fill"></div>
+            </div>
+            
+            <button id="cancel-matching-btn" class="secondary-btn btn-full">Cancel Search</button>
+          </div>
+        </div>
+
+        <!-- STEP 4: Active Ride Panel -->
+        <div id="panel-active-ride" class="panel-step">
+          <div class="trip-header">
+            <span class="trip-badge">On Trip</span>
+            <span class="otp-badge" id="trip-otp">OTP: ----</span>
+          </div>
+
+          <!-- Driver Info Card -->
+          <div class="driver-card">
+            <div class="driver-avatar-container">
+              <div class="driver-avatar-placeholder">
+                <i data-lucide="user"></i>
+              </div>
+              <div class="driver-rating-badge">
+                <span id="driver-rating">4.8</span> <i data-lucide="star"></i>
+              </div>
+            </div>
+            <div class="driver-details">
+              <h4 id="driver-name">Rajesh Kumar</h4>
+              <p id="vehicle-details">White Suzuki Swift • DL 1RT 2394</p>
+            </div>
+          </div>
+
+          <!-- Trip Status Details -->
+          <div class="trip-status-card">
+            <div class="trip-status-icon-container">
+              <i data-lucide="navigation" class="navigation-pulsing-icon"></i>
+            </div>
+            <div class="trip-status-text">
+              <p class="trip-status-title" id="trip-status-title">Driver is arriving</p>
+              <p class="trip-status-desc" id="trip-status-desc">Arriving at pickup location in 2 mins</p>
+            </div>
+          </div>
+
+          <!-- Progress Ring & Details -->
+          <div class="trip-progress-container">
+            <div class="trip-progress-bar-flat">
+              <div id="trip-progress-fill-flat" class="trip-progress-fill-flat"></div>
+            </div>
+            <div class="trip-eta-row">
+              <span id="trip-eta-text">ETA: -- mins</span>
+              <span id="trip-distance-remaining">-- km remaining</span>
+            </div>
+          </div>
+
+          <!-- Interaction buttons -->
+          <div class="trip-actions">
+            <button class="icon-btn tooltip" data-tooltip="Call Driver">
+              <i data-lucide="phone"></i>
+            </button>
+            <button class="icon-btn tooltip" data-tooltip="Message Driver">
+              <i data-lucide="message-square"></i>
+            </button>
+            <button id="cancel-trip-btn" class="danger-btn flex-grow">Cancel Ride</button>
+          </div>
+        </div>
+
+        <!-- STEP 5: Ride Completed Panel -->
+        <div id="panel-completed" class="panel-step">
+          <div class="completed-container">
+            <div class="checkmark-circle">
+              <i data-lucide="check"></i>
+            </div>
+            <h3 class="completed-title">You have arrived!</h3>
+            <p class="completed-subtitle">Thank you for riding with us</p>
+
+            <div class="receipt-card">
+              <div class="receipt-row">
+                <span>Total Fare Paid</span>
+                <strong id="receipt-fare">₹0.00</strong>
+              </div>
+              <div class="receipt-divider"></div>
+              <div class="receipt-row">
+                <span>Distance Traveled</span>
+                <span id="receipt-distance">0.0 km</span>
+              </div>
+              <div class="receipt-row">
+                <span>Duration</span>
+                <span id="receipt-duration">0 min</span>
+              </div>
+              <div class="receipt-row">
+                <span>Payment Method</span>
+                <span>Wallet</span>
+              </div>
+            </div>
+
+            <!-- Rating Section -->
+            <div class="rating-section">
+              <p>Rate your driver</p>
+              <div class="stars-container">
+                <i data-lucide="star" class="star-btn" data-rating="1"></i>
+                <i data-lucide="star" class="star-btn" data-rating="2"></i>
+                <i data-lucide="star" class="star-btn" data-rating="3"></i>
+                <i data-lucide="star" class="star-btn" data-rating="4"></i>
+                <i data-lucide="star" class="star-btn" data-rating="5"></i>
+              </div>
+            </div>
+
+            <button id="finish-ride-btn" class="primary-btn btn-full">Done</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+
+
+  <!-- App Entry Script -->
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
