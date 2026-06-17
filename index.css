@@ -230,7 +230,6 @@ body, html {
   opacity: 0;
   transform: translateY(15px);
   flex-direction: column;
-  height: 100%;
 }
 
 .panel-step.active {
@@ -564,6 +563,7 @@ body, html {
   gap: 8px;
   margin-bottom: 20px;
   overflow-y: auto;
+  min-height: 180px;
 }
 
 /* Ride Option card structure */
@@ -1633,12 +1633,21 @@ body, html {
   gap: 8px;
   overflow-x: auto;
   padding-bottom: 12px;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
 }
 
 .category-pills::-webkit-scrollbar {
-  display: none;
+  height: 4px;
+}
+
+.category-pills::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.category-pills::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 2px;
 }
 
 .category-pill {

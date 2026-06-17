@@ -383,6 +383,21 @@ function startActiveRide() {
   
   const coords = state.route.coordinates;
   const numCoords = coords.length;
+
+  let stopCoordIdx = -1;
+  let hasReachedStop = false;
+  if (state.intermediateStop) {
+    let minDist = Infinity;
+    for (let i = 0; i < numCoords; i++) {
+      const latDiff = coords[i][0] - state.intermediateStop.lat;
+      const lngDiff = coords[i][1] - state.intermediateStop.lng;
+      const d = latDiff * latDiff + lngDiff * lngDiff;
+      if (d < minDist) {
+        minDist = d;
+        stopCoordIdx = i;
+      }
+    }
+  }
   
   const pickupCoord = coords[0];
   let driverLat = pickupCoord[0] + (Math.random() - 0.5) * 0.015;
@@ -408,7 +423,7 @@ function startActiveRide() {
   const stepLatDiff = (pickupCoord[0] - driverLat) / totalArriveSteps;
   const stepLngDiff = (pickupCoord[1] - driverLng) / totalArriveSteps;
   
-  state.activeRideInterval = setInterval(() => {
+  const rideIntervalFn = () => {
     if (step < totalArriveSteps) {
       driverLat += stepLatDiff;
       driverLng += stepLngDiff;
@@ -438,8 +453,25 @@ function startActiveRide() {
         
         state.mapAdapter.setView(currentCoord[0], currentCoord[1], 14);
         
-        statusTitle.textContent = "Ride in progress";
-        statusDesc.textContent = `On the way to ${state.destination.name.split(',')[0]}`;
+        if (state.intermediateStop && !hasReachedStop && coordIdx === stopCoordIdx) {
+          statusTitle.textContent = "Reached Stop";
+          statusDesc.textContent = `Waiting at ${state.intermediateStop.name.split(',')[0]}...`;
+          clearInterval(state.activeRideInterval);
+          hasReachedStop = true;
+          setTimeout(() => {
+            state.activeRideInterval = setInterval(rideIntervalFn, 1000);
+          }, 4000);
+          step++;
+          return;
+        }
+
+        if (state.intermediateStop && !hasReachedStop && coordIdx < stopCoordIdx) {
+          statusTitle.textContent = "Ride in progress";
+          statusDesc.textContent = `Heading to ${state.intermediateStop.name.split(',')[0]}`;
+        } else {
+          statusTitle.textContent = "Ride in progress";
+          statusDesc.textContent = `Heading to ${state.destination.name.split(',')[0]}`;
+        }
         
         const progressPercent = Math.round((coordIdx / numCoords) * 100);
         progressBar.style.width = `${progressPercent}%`;
@@ -456,7 +488,9 @@ function startActiveRide() {
         completeRide();
       }
     }
-  }, 1000);
+  };
+
+  state.activeRideInterval = setInterval(rideIntervalFn, 1000);
 }
 
 // STEP 5: Ride Completed Flow
