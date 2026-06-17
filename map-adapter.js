@@ -11,6 +11,7 @@ export class MapAdapter {
       destination: null,
       driver: null
     };
+    this.stopMarkers = []; // Along-the-Route Discovery stop markers
     this.routeLine = null;
   }
 
@@ -133,6 +134,20 @@ export class MapAdapter {
         iconSize: [30, 30],
         iconAnchor: [15, 15]
       });
+    } else if (type === 'stop') {
+      icon = window.L.divIcon({
+        className: 'custom-stop-marker',
+        html: `<div style="
+          width: 14px; 
+          height: 14px; 
+          background: #f59e0b; 
+          border: 3px solid #0a0a0a; 
+          border-radius: 50%;
+          box-shadow: 0 0 10px rgba(245, 158, 11, 0.8), 0 0 0 3px rgba(245, 158, 11, 0.3);
+        "></div>`,
+        iconSize: [14, 14],
+        iconAnchor: [7, 7]
+      });
     }
 
     const markerObj = window.L.marker([lat, lng], { icon }).addTo(this.map);
@@ -248,6 +263,181 @@ export class MapAdapter {
 
     return [];
   }
+
+  // =============================================
+  // Along-the-Route Discovery Methods
+  // =============================================
+
+  // Search for POIs along a route corridor using Overpass API
+  async searchPOIsAlongRoute(routeCoordinates, category) {
+    if (!routeCoordinates || routeCoordinates.length === 0) return [];
+
+    // OSM tag mapping for each category
+    const categoryTags = {
+      'florist':      ['shop=florist'],
+      'cafe':         ['amenity=cafe'],
+      'restaurant':   ['amenity=restaurant'],
+      'pharmacy':     ['amenity=pharmacy'],
+      'grocery':      ['shop=supermarket', 'shop=convenience'],
+      'gift':         ['shop=gift']
+    };
+
+    const tags = categoryTags[category];
+    if (!tags) return [];
+
+    // Compute bounding box of the route corridor with ~800m buffer
+    const BUFFER = 0.008; // ~800m in degrees
+    let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+    
+    routeCoordinates.forEach(coord => {
+      // coords are [lat, lng]
+      if (coord[0] < minLat) minLat = coord[0];
+      if (coord[0] > maxLat) maxLat = coord[0];
+      if (coord[1] < minLng) minLng = coord[1];
+      if (coord[1] > maxLng) maxLng = coord[1];
+    });
+
+    minLat -= BUFFER;
+    maxLat += BUFFER;
+    minLng -= BUFFER;
+    maxLng += BUFFER;
+
+    // Build Overpass QL query
+    const bbox = `${minLat},${minLng},${maxLat},${maxLng}`;
+    const tagQueries = tags.map(tag => {
+      const [key, value] = tag.split('=');
+      return `node["${key}"="${value}"](${bbox});\nway["${key}"="${value}"](${bbox});`;
+    }).join('\n');
+
+    const overpassQuery = `
+      [out:json][timeout:10];
+      (
+        ${tagQueries}
+      );
+      out center 25;
+    `;
+
+    try {
+      const res = await fetch('https://overpass-api.de/api/interpreter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `data=${encodeURIComponent(overpassQuery)}`
+      });
+
+      if (!res.ok) throw new Error('Overpass API error');
+      const data = await res.json();
+
+      if (!data.elements || data.elements.length === 0) return [];
+
+      // Process results and estimate detour
+      const pois = data.elements
+        .map(el => {
+          const lat = el.lat || (el.center && el.center.lat);
+          const lng = el.lon || (el.center && el.center.lon);
+          if (!lat || !lng) return null;
+
+          const name = (el.tags && el.tags.name) || 'Unnamed';
+          const detourInfo = this._estimateDetour(lat, lng, routeCoordinates);
+
+          return {
+            name: name,
+            lat: lat,
+            lng: lng,
+            category: category,
+            distanceFromRoute: detourInfo.distanceKm,
+            estimatedDetourMin: detourInfo.estimatedMinutes,
+            osmTags: el.tags || {}
+          };
+        })
+        .filter(poi => poi !== null && poi.estimatedDetourMin <= 10) // Max 10 min detour
+        .sort((a, b) => a.estimatedDetourMin - b.estimatedDetourMin)
+        .slice(0, 8); // Limit to 8 results
+
+      return pois;
+    } catch (err) {
+      console.error('Overpass POI search failed:', err);
+      return [];
+    }
+  }
+
+  // Estimate detour time for a POI based on distance from nearest route point
+  _estimateDetour(poiLat, poiLng, routeCoordinates) {
+    let minDist = Infinity;
+
+    // Sample every 5th point for performance
+    const step = Math.max(1, Math.floor(routeCoordinates.length / 50));
+    for (let i = 0; i < routeCoordinates.length; i += step) {
+      const d = haversineDistance(poiLat, poiLng, routeCoordinates[i][0], routeCoordinates[i][1]);
+      if (d < minDist) minDist = d;
+    }
+
+    // Round-trip detour estimate: go to POI + come back to route + 2 min stop time
+    const detourKm = minDist * 2;
+    // Assume city speed ~25 km/h, plus 2 min for the stop itself
+    const detourMinutes = Math.round((detourKm / 25) * 60) + 2;
+
+    return {
+      distanceKm: parseFloat(minDist.toFixed(2)),
+      estimatedMinutes: Math.max(2, detourMinutes) // Minimum 2 min
+    };
+  }
+
+  // Get multi-stop route: pickup → stop → destination via OSRM
+  async getMultiStopRoute(pickupLat, pickupLng, stopLat, stopLng, destLat, destLng) {
+    const url = `https://router.project-osrm.org/route/v1/driving/${pickupLng},${pickupLat};${stopLng},${stopLat};${destLng},${destLat}?overview=full&geometries=geojson`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error("Failed to compute multi-stop route");
+    }
+    const data = await response.json();
+    if (data.code !== 'Ok' || !data.routes || data.routes.length === 0) {
+      throw new Error("No multi-stop route found");
+    }
+
+    const route = data.routes[0];
+    const distanceKm = (route.distance / 1000).toFixed(1);
+    const durationMin = Math.round(route.duration / 60);
+    const pathCoords = route.geometry.coordinates.map(coord => [coord[1], coord[0]]);
+
+    return {
+      distance: parseFloat(distanceKm),
+      duration: durationMin,
+      coordinates: pathCoords
+    };
+  }
+
+  // Add a stop marker (separate from the main markers dict since multiple could exist)
+  addStopMarker(lat, lng, popupText) {
+    const marker = this.addMarker(lat, lng, 'stop', { popupText });
+    // addMarker sets this.markers['stop'], but we also track in the array
+    this.stopMarkers.push(marker);
+    return marker;
+  }
+
+  // Remove all stop markers from the map
+  removeAllStopMarkers() {
+    this.stopMarkers.forEach(m => {
+      if (this.map && m) this.map.removeLayer(m);
+    });
+    this.stopMarkers = [];
+    // Also clear the main markers entry
+    if (this.markers.stop) {
+      this.removeMarker('stop');
+    }
+  }
+}
+
+// Haversine distance in km between two lat/lng pairs
+function haversineDistance(lat1, lng1, lat2, lng2) {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) *
+    Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
 }
 
 // Math Utility: Calculate bearing/heading between coordinates to rotate driver car marker

@@ -131,10 +131,88 @@
               <span class="summary-label">Duration</span>
               <span id="summary-duration" class="summary-val">-- min</span>
             </div>
+            <div id="route-summary-stop" class="route-summary-stop-info">
+              <i data-lucide="map-pin"></i> Stop: <span id="route-summary-stop-name">---</span>
+            </div>
+          </div>
+
+          <!-- Stop Added Banner -->
+          <div id="stop-added-banner" class="stop-added-banner">
+            <div class="stop-banner-icon">
+              <i data-lucide="map-pin"></i>
+            </div>
+            <div class="stop-banner-details">
+              <div class="stop-banner-label">Intermediate Stop Added</div>
+              <div class="stop-banner-name" id="stop-banner-name">Coffee Day, Koramangala</div>
+              <div class="stop-banner-detour" id="stop-banner-detour">
+                <i data-lucide="clock"></i> <span>+4 min detour</span>
+              </div>
+            </div>
+            <button class="stop-remove-btn" id="stop-remove-btn" title="Remove stop">
+              <i data-lucide="x"></i>
+            </button>
           </div>
 
           <div class="ride-options-list" id="ride-options-container">
             <!-- Dynamic Injection of Ride Cards -->
+          </div>
+
+          <!-- Along-the-Route Discovery Trigger Button -->
+          <button class="discovery-trigger-btn" id="discovery-trigger-btn" type="button">
+            <div class="discovery-trigger-icon">
+              <i data-lucide="sparkles"></i>
+            </div>
+            <div class="discovery-trigger-text">
+              <span class="discovery-trigger-title">Need something on the way?</span>
+              <span class="discovery-trigger-subtitle">Add a quick stop with minimal detour</span>
+            </div>
+            <div class="discovery-trigger-arrow">
+              <i data-lucide="chevron-right"></i>
+            </div>
+          </button>
+
+          <!-- Along-the-Route Discovery Drawer -->
+          <div class="discovery-drawer" id="discovery-drawer">
+            <div class="discovery-drawer-inner">
+              <div class="discovery-header">
+                <div class="discovery-header-title">
+                  <i data-lucide="compass"></i> Explore Along Route
+                </div>
+                <button class="discovery-close-btn" id="discovery-close-btn" title="Close">
+                  <i data-lucide="x"></i>
+                </button>
+              </div>
+
+              <!-- Category Pills -->
+              <div class="category-pills">
+                <div class="category-pill" data-category="florist">
+                  <span class="category-pill-emoji">🌸</span> Flowers
+                </div>
+                <div class="category-pill" data-category="cafe">
+                  <span class="category-pill-emoji">☕</span> Coffee
+                </div>
+                <div class="category-pill" data-category="restaurant">
+                  <span class="category-pill-emoji">🍽️</span> Food
+                </div>
+                <div class="category-pill" data-category="pharmacy">
+                  <span class="category-pill-emoji">💊</span> Pharmacy
+                </div>
+                <div class="category-pill" data-category="grocery">
+                  <span class="category-pill-emoji">🛒</span> Grocery
+                </div>
+                <div class="category-pill" data-category="gift">
+                  <span class="category-pill-emoji">🎁</span> Gifts
+                </div>
+              </div>
+
+              <!-- POI Results -->
+              <div class="poi-results-container" id="poi-results-container">
+                <div class="poi-empty-state">
+                  <div class="empty-icon">🗺️</div>
+                  <div>Select a category above to find spots along your route</div>
+                </div>
+              </div>
+            </div>
           </div>
 
           <div class="payment-selection-row">

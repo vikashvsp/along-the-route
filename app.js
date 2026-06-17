@@ -7,6 +7,9 @@ const state = {
   pickup: { name: '', lat: null, lng: null },
   destination: { name: '', lat: null, lng: null },
   route: null, // { distance, duration, coordinates }
+  originalRoute: null, // Cached original direct route
+  intermediateStop: null, // Intermediate stop if added
+  discoveryOpen: false, // Whether the discovery drawer is open
   selectedVehicle: null,
   driverMarker: null,
   activeRideInterval: null,
@@ -224,6 +227,20 @@ async function handleRouteCalculation() {
     );
     
     state.route = route;
+    state.originalRoute = route; // Cache original route
+    state.intermediateStop = null; // Clear stop
+
+    // Clear any existing stop markers and UI
+    if (state.mapAdapter.removeAllStopMarkers) {
+      state.mapAdapter.removeAllStopMarkers();
+    }
+    const stopBanner = document.getElementById('stop-added-banner');
+    if (stopBanner) stopBanner.classList.remove('visible');
+    const summaryStop = document.getElementById('route-summary-stop');
+    if (summaryStop) summaryStop.classList.remove('visible');
+    const triggerBtn = document.getElementById('discovery-trigger-btn');
+    if (triggerBtn) triggerBtn.style.display = 'flex';
+    closeDiscovery();
 
     // Draw route on map
     state.mapAdapter.drawRoute(route.coordinates);
@@ -455,6 +472,230 @@ function completeRide() {
   showPanelStep('completed');
 }
 
+// =============================================
+// Along-the-Route Discovery UI & Logic Handlers
+// =============================================
+
+function openDiscovery() {
+  const drawer = document.getElementById('discovery-drawer');
+  if (!drawer) return;
+  drawer.classList.add('open');
+  state.discoveryOpen = true;
+  
+  const arrow = document.querySelector('#discovery-trigger-btn .discovery-trigger-arrow i');
+  if (arrow && window.lucide) {
+    arrow.setAttribute('data-lucide', 'chevron-down');
+    window.lucide.createIcons();
+  }
+}
+
+function closeDiscovery() {
+  const drawer = document.getElementById('discovery-drawer');
+  if (!drawer) return;
+  drawer.classList.remove('open');
+  state.discoveryOpen = false;
+  
+  const arrow = document.querySelector('#discovery-trigger-btn .discovery-trigger-arrow i');
+  if (arrow && window.lucide) {
+    arrow.setAttribute('data-lucide', 'chevron-right');
+    window.lucide.createIcons();
+  }
+}
+
+function getCategoryEmoji(category) {
+  const emojiMap = {
+    'florist': '🌸',
+    'cafe': '☕',
+    'restaurant': '🍽️',
+    'pharmacy': '💊',
+    'grocery': '🛒',
+    'gift': '🎁'
+  };
+  return emojiMap[category] || '📍';
+}
+
+async function searchCategory(category) {
+  const resultsContainer = document.getElementById('poi-results-container');
+  if (!resultsContainer) return;
+  
+  // Render loading state skeleton
+  resultsContainer.innerHTML = `
+    <div class="poi-loading">
+      <div class="poi-skeleton"></div>
+      <div class="poi-skeleton"></div>
+      <div class="poi-skeleton"></div>
+    </div>
+  `;
+  
+  // Update category pills UI active state
+  document.querySelectorAll('.category-pill').forEach(pill => {
+    if (pill.dataset.category === category) {
+      pill.classList.add('active');
+    } else {
+      pill.classList.remove('active');
+    }
+  });
+  
+  if (!state.originalRoute || !state.originalRoute.coordinates) {
+    resultsContainer.innerHTML = `
+      <div class="poi-empty-state">
+        <div class="empty-icon">😢</div>
+        <div>No route found. Please set your pickup and destination.</div>
+      </div>
+    `;
+    return;
+  }
+  
+  try {
+    const pois = await state.mapAdapter.searchPOIsAlongRoute(state.originalRoute.coordinates, category);
+    
+    if (pois.length === 0) {
+      resultsContainer.innerHTML = `
+        <div class="poi-empty-state">
+          <div class="empty-icon">😢</div>
+          <div>No spots found along this route. Try another category!</div>
+        </div>
+      `;
+      return;
+    }
+    
+    resultsContainer.innerHTML = '';
+    pois.forEach(poi => {
+      const card = document.createElement('div');
+      card.className = 'poi-result-card';
+      card.innerHTML = `
+        <div class="poi-icon-container">
+          ${getCategoryEmoji(poi.category)}
+        </div>
+        <div class="poi-details">
+          <div class="poi-name" title="${poi.name}">${poi.name}</div>
+          <div class="poi-distance-text">${poi.distanceFromRoute} km from route</div>
+        </div>
+        <div class="detour-badge">
+          <i data-lucide="clock"></i> <span>+${poi.estimatedDetourMin} min</span>
+        </div>
+        <button class="poi-add-btn" title="Add stop">
+          <i data-lucide="plus"></i>
+        </button>
+      `;
+      
+      const addStopHandler = async (e) => {
+        e.stopPropagation();
+        await addIntermediateStop(poi);
+      };
+      
+      card.querySelector('.poi-add-btn').addEventListener('click', addStopHandler);
+      card.addEventListener('click', addStopHandler);
+      
+      resultsContainer.appendChild(card);
+    });
+    
+    if (window.lucide) {
+      window.lucide.createIcons();
+    }
+  } catch (err) {
+    console.error("POI search error:", err);
+    resultsContainer.innerHTML = `
+      <div class="poi-empty-state">
+        <div class="empty-icon">⚠️</div>
+        <div>Search failed. Please try again.</div>
+      </div>
+    `;
+  }
+}
+
+async function addIntermediateStop(poi) {
+  const badge = document.getElementById('provider-badge');
+  const badgeText = document.getElementById('provider-text');
+  badgeText.textContent = "Adding stop & recalculating route...";
+  badge.style.display = "flex";
+  
+  try {
+    const multiStopRoute = await state.mapAdapter.getMultiStopRoute(
+      state.pickup.lat, state.pickup.lng,
+      poi.lat, poi.lng,
+      state.destination.lat, state.destination.lng
+    );
+    
+    state.intermediateStop = {
+      name: poi.name,
+      lat: poi.lat,
+      lng: poi.lng,
+      detourMin: poi.estimatedDetourMin
+    };
+    state.route = multiStopRoute;
+    
+    // Clear and redraw stop markers
+    state.mapAdapter.removeAllStopMarkers();
+    state.mapAdapter.addStopMarker(poi.lat, poi.lng, `Stop: ${poi.name}`);
+    
+    state.mapAdapter.drawRoute(multiStopRoute.coordinates);
+    
+    document.getElementById('summary-distance').textContent = `${multiStopRoute.distance} km`;
+    document.getElementById('summary-duration').textContent = `${multiStopRoute.duration} mins`;
+    
+    const bannerName = document.getElementById('stop-banner-name');
+    const bannerDetour = document.querySelector('#stop-banner-detour span');
+    const stopBanner = document.getElementById('stop-added-banner');
+    
+    if (bannerName) bannerName.textContent = poi.name;
+    if (bannerDetour) bannerDetour.textContent = `+${poi.estimatedDetourMin} min detour`;
+    if (stopBanner) stopBanner.classList.add('visible');
+    
+    const summaryStop = document.getElementById('route-summary-stop');
+    const summaryStopName = document.getElementById('route-summary-stop-name');
+    if (summaryStopName) summaryStopName.textContent = poi.name;
+    if (summaryStop) summaryStop.classList.add('visible');
+    
+    const triggerBtn = document.getElementById('discovery-trigger-btn');
+    if (triggerBtn) triggerBtn.style.display = 'none';
+    
+    closeDiscovery();
+    renderVehicleOptions();
+    
+    badgeText.textContent = `Map Engine • Connected`;
+  } catch (err) {
+    console.error("Failed to add stop:", err);
+    alert("Could not calculate route through this stop. Please select another stop.");
+    badgeText.textContent = "Routing Failed";
+  }
+}
+
+function removeIntermediateStop() {
+  if (!state.originalRoute) return;
+  
+  state.intermediateStop = null;
+  state.route = state.originalRoute;
+  
+  state.mapAdapter.removeAllStopMarkers();
+  state.mapAdapter.drawRoute(state.originalRoute.coordinates);
+  
+  document.getElementById('summary-distance').textContent = `${state.originalRoute.distance} km`;
+  document.getElementById('summary-duration').textContent = `${state.originalRoute.duration} mins`;
+  
+  const stopBanner = document.getElementById('stop-added-banner');
+  if (stopBanner) stopBanner.classList.remove('visible');
+  
+  const summaryStop = document.getElementById('route-summary-stop');
+  if (summaryStop) summaryStop.classList.remove('visible');
+  
+  const triggerBtn = document.getElementById('discovery-trigger-btn');
+  if (triggerBtn) triggerBtn.style.display = 'flex';
+  
+  document.querySelectorAll('.category-pill').forEach(pill => pill.classList.remove('active'));
+  const resultsContainer = document.getElementById('poi-results-container');
+  if (resultsContainer) {
+    resultsContainer.innerHTML = `
+      <div class="poi-empty-state">
+        <div class="empty-icon">🗺️</div>
+        <div>Select a category above to find spots along your route</div>
+      </div>
+    `;
+  }
+  
+  renderVehicleOptions();
+}
+
 // Cancel Booking/Ride and reset map state
 function resetRideState() {
   clearInterval(state.activeRideInterval);
@@ -462,6 +703,10 @@ function resetRideState() {
   state.mapAdapter.removeMarker('pickup');
   state.mapAdapter.removeMarker('destination');
   state.mapAdapter.clearRoute();
+  
+  if (state.mapAdapter.removeAllStopMarkers) {
+    state.mapAdapter.removeAllStopMarkers();
+  }
   
   document.getElementById('pickup-input').value = '';
   document.getElementById('destination-input').value = '';
@@ -471,7 +716,17 @@ function resetRideState() {
   state.pickup = { name: '', lat: null, lng: null };
   state.destination = { name: '', lat: null, lng: null };
   state.route = null;
+  state.originalRoute = null;
+  state.intermediateStop = null;
   state.selectedVehicle = null;
+  
+  const stopBanner = document.getElementById('stop-added-banner');
+  if (stopBanner) stopBanner.classList.remove('visible');
+  const summaryStop = document.getElementById('route-summary-stop');
+  if (summaryStop) summaryStop.classList.remove('visible');
+  const triggerBtn = document.getElementById('discovery-trigger-btn');
+  if (triggerBtn) triggerBtn.style.display = 'flex';
+  closeDiscovery();
   
   state.mapAdapter.setView(12.9716, 77.5946, 12);
   
@@ -751,6 +1006,19 @@ async function initApp() {
   document.getElementById('back-to-search').addEventListener('click', () => {
     state.mapAdapter.clearRoute();
     state.mapAdapter.removeMarker('driver');
+    if (state.mapAdapter.removeAllStopMarkers) {
+      state.mapAdapter.removeAllStopMarkers();
+    }
+    state.intermediateStop = null;
+    state.originalRoute = null;
+    const stopBanner = document.getElementById('stop-added-banner');
+    if (stopBanner) stopBanner.classList.remove('visible');
+    const summaryStop = document.getElementById('route-summary-stop');
+    if (summaryStop) summaryStop.classList.remove('visible');
+    const triggerBtn = document.getElementById('discovery-trigger-btn');
+    if (triggerBtn) triggerBtn.style.display = 'flex';
+    closeDiscovery();
+    
     resetSlideButton();
     showPanelStep('search');
   });
@@ -788,6 +1056,42 @@ async function initApp() {
 
   // Setup slide gesture confirmation
   setupSlideConfirm();
+  
+  // 6. Along-the-Route Discovery Event Listeners
+  const triggerBtn = document.getElementById('discovery-trigger-btn');
+  const closeBtn = document.getElementById('discovery-close-btn');
+  const stopRemoveBtn = document.getElementById('stop-remove-btn');
+  
+  if (triggerBtn) {
+    triggerBtn.addEventListener('click', () => {
+      if (state.discoveryOpen) {
+        closeDiscovery();
+      } else {
+        openDiscovery();
+      }
+    });
+  }
+  
+  if (closeBtn) {
+    closeBtn.addEventListener('click', () => {
+      closeDiscovery();
+    });
+  }
+  
+  if (stopRemoveBtn) {
+    stopRemoveBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      removeIntermediateStop();
+    });
+  }
+  
+  // Category Pill Clicks
+  document.querySelectorAll('.category-pill').forEach(pill => {
+    pill.addEventListener('click', () => {
+      const category = pill.dataset.category;
+      searchCategory(category);
+    });
+  });
   
   // Set initial step layout view
   showPanelStep('search');
