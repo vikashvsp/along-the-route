@@ -317,54 +317,48 @@ export class MapAdapter {
       out center 25;
     `;
 
-    // Try multiple endpoints to avoid downtime
-    const endpoints = [
-      'https://overpass-api.de/api/interpreter',
-      'https://lz4.overpass-api.de/api/interpreter',
-      'https://overpass.kumi.systems/api/interpreter'
-    ];
-
     let pois = [];
 
-    for (const baseUrl of endpoints) {
-      try {
-        // Construct GET URL with data parameter. GET requests are simple requests
-        // and do not trigger preflight OPTIONS checks, enabling smooth CORS from browser.
-        const url = `${baseUrl}?data=${encodeURIComponent(overpassQuery)}`;
-        const res = await fetch(url);
+    try {
+      // Route through our own Vercel serverless proxy (/api/overpass).
+      // This is necessary because Overpass API requires a custom User-Agent header,
+      // which browsers forbid JavaScript from setting, causing a 406 + CORS block.
+      // The proxy runs server-side where there are no such restrictions.
+      const res = await fetch('/api/overpass', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: overpassQuery })
+      });
 
-        if (!res.ok) {
-          throw new Error(`HTTP error! status: ${res.status}`);
-        }
-
-        const data = await res.json();
-        if (data && data.elements && data.elements.length > 0) {
-          pois = data.elements
-            .map(el => {
-              const lat = el.lat || (el.center && el.center.lat);
-              const lng = el.lon || (el.center && el.center.lon);
-              if (!lat || !lng) return null;
-
-              const name = (el.tags && el.tags.name) || 'Unnamed';
-              const detourInfo = this._estimateDetour(lat, lng, routeCoordinates);
-
-              return {
-                name: name,
-                lat: lat,
-                lng: lng,
-                category: category,
-                distanceFromRoute: detourInfo.distanceKm,
-                estimatedDetourMin: detourInfo.estimatedMinutes,
-                osmTags: el.tags || {}
-              };
-            })
-            .filter(poi => poi !== null && poi.estimatedDetourMin <= 10); // Max 10 min detour
-          
-          break; // Successfully got and parsed data from this endpoint
-        }
-      } catch (err) {
-        console.warn(`Overpass GET endpoint failed (${baseUrl}):`, err);
+      if (!res.ok) {
+        throw new Error(`Proxy returned HTTP ${res.status}`);
       }
+
+      const data = await res.json();
+      if (data && data.elements) {
+        pois = data.elements
+          .map(el => {
+            const lat = el.lat || (el.center && el.center.lat);
+            const lng = el.lon || (el.center && el.center.lon);
+            if (!lat || !lng) return null;
+
+            const name = (el.tags && el.tags.name) || 'Unnamed';
+            const detourInfo = this._estimateDetour(lat, lng, routeCoordinates);
+
+            return {
+              name: name,
+              lat: lat,
+              lng: lng,
+              category: category,
+              distanceFromRoute: detourInfo.distanceKm,
+              estimatedDetourMin: detourInfo.estimatedMinutes,
+              osmTags: el.tags || {}
+            };
+          })
+          .filter(poi => poi !== null && poi.estimatedDetourMin <= 10); // Max 10 min detour
+      }
+    } catch (err) {
+      console.error('Overpass proxy request failed:', err);
     }
 
     // Sort and limit
