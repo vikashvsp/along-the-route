@@ -580,6 +580,7 @@ async function searchCategory(category) {
   // Check cache before showing loading skeleton — instant path
   const cacheKey = state.cache.poiKey(state.originalRoute.coordinates, category);
   const cacheHit = state.cache.getPOIs(cacheKey);
+  const infoBanner = document.getElementById('poi-info-banner');
 
   if (!cacheHit) {
     // Cache miss: show loading skeleton while we fetch
@@ -590,6 +591,13 @@ async function searchCategory(category) {
         <div class="poi-skeleton"></div>
       </div>
     `;
+    if (infoBanner) {
+      infoBanner.classList.remove('hidden');
+    }
+  } else {
+    if (infoBanner) {
+      infoBanner.classList.add('hidden');
+    }
   }
 
   try {
@@ -598,12 +606,21 @@ async function searchCategory(category) {
       category,
       state.cache,
       // onStaleRefresh: silently update results when background refetch completes
-      (freshPOIs) => renderPOIResults(freshPOIs, resultsContainer, category, false)
+      (freshPOIs) => {
+        if (infoBanner) infoBanner.classList.add('hidden');
+        renderPOIResults(freshPOIs, resultsContainer, category, false);
+      }
     );
     
+    if (infoBanner) {
+      infoBanner.classList.add('hidden');
+    }
     renderPOIResults(pois, resultsContainer, category, fromCache);
   } catch (err) {
     console.error("POI search error:", err);
+    if (infoBanner) {
+      infoBanner.classList.add('hidden');
+    }
     resultsContainer.innerHTML = `
       <div class="poi-empty-state">
         <div class="empty-icon">⚠️</div>
@@ -763,6 +780,11 @@ function removeIntermediateStop() {
     `;
   }
   
+  const infoBanner = document.getElementById('poi-info-banner');
+  if (infoBanner) {
+    infoBanner.classList.add('hidden');
+  }
+  
   renderVehicleOptions();
 }
 
@@ -803,6 +825,11 @@ function resetRideState() {
   
   state.mapAdapter.setView(12.9716, 77.5946, 12);
   
+  const infoBanner = document.getElementById('poi-info-banner');
+  if (infoBanner) {
+    infoBanner.classList.add('hidden');
+  }
+
   resetSlideButton();
   showPanelStep('search');
 }

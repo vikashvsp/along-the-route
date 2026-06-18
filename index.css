@@ -1685,6 +1685,35 @@ body, html {
   line-height: 1;
 }
 
+/* POI Loading Info Banner */
+.poi-info-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(39, 110, 241, 0.08);
+  border: 1px solid rgba(39, 110, 241, 0.2);
+  color: var(--text-primary);
+  font-size: 11.5px;
+  margin-top: 4px;
+  margin-bottom: 12px;
+  transition: all 0.3s ease;
+  opacity: 1;
+  animation: slideIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.poi-info-banner.hidden {
+  display: none;
+}
+
+.poi-info-banner svg {
+  width: 14px;
+  height: 14px;
+  color: #60a5fa;
+  flex-shrink: 0;
+}
+
 /* POI Results */
 .poi-results-container {
   display: flex;
