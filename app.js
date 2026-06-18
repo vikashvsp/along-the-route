@@ -16,7 +16,8 @@ const state = {
   activeRideInterval: null,
   mapAdapter: null,
   activeInputField: 'destination', // Default to 'destination' on load
-  cache: new RouteCache()          // Two-level API cache (L1: routes, L2: POIs)
+  cache: new RouteCache(),         // Two-level API cache (L1: routes, L2: POIs)
+  _lastKnownLocation: null         // User's last GPS fix — used to reset map to correct city
 };
 
 // Helper: Reverse geocode coordinates using Photon Komoot API
@@ -823,7 +824,11 @@ function resetRideState() {
   if (triggerBtn) triggerBtn.style.display = 'flex';
   closeDiscovery();
   
-  state.mapAdapter.setView(12.9716, 77.5946, 12);
+  // Return map to user's last known location, falling back to Bangalore if unknown
+  const resetCenter = state._lastKnownLocation
+    ? [state._lastKnownLocation.lat, state._lastKnownLocation.lng]
+    : [12.9716, 77.5946];
+  state.mapAdapter.setView(resetCenter[0], resetCenter[1], 12);
   
   const infoBanner = document.getElementById('poi-info-banner');
   if (infoBanner) {
@@ -855,6 +860,8 @@ async function initApp() {
         async (position) => {
           const lat = position.coords.latitude;
           const lng = position.coords.longitude;
+          // Store for city-agnostic map reset (supports Hyderabad, Delhi, etc.)
+          state._lastKnownLocation = { lat, lng };
           
           try {
             const name = await reverseGeocode(lat, lng);
@@ -896,6 +903,8 @@ async function initApp() {
         async (position) => {
           const lat = position.coords.latitude;
           const lng = position.coords.longitude;
+          // Update last known GPS fix whenever user actively locates themselves
+          state._lastKnownLocation = { lat, lng };
           state.mapAdapter.setView(lat, lng, 14);
           
           try {
