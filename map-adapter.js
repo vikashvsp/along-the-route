@@ -168,28 +168,52 @@ export class MapAdapter {
     this.markers[type] = null;
   }
 
-  // Calculate directions via free public OSRM API
-  async getRoute(startLat, startLng, endLat, endLng) {
-    const url = `https://router.project-osrm.org/route/v1/driving/${startLng},${startLat};${endLng},${endLat}?overview=full&geometries=geojson`;
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error("Failed to compute route");
-    }
-    const data = await response.json();
-    if (data.code !== 'Ok' || !data.routes || data.routes.length === 0) {
-      throw new Error("No route found");
-    }
+  // Calculate directions via free public OSRM API.
+  // @param {RouteCache|null} cache  - optional L1 cache instance
+  // @param {Function|null}   onStaleRefresh - called with fresh route when background re-fetch completes
+  async getRoute(startLat, startLng, endLat, endLng, cache = null, onStaleRefresh = null) {
+    const fetchFresh = async () => {
+      const url = `https://router.project-osrm.org/route/v1/driving/${startLng},${startLat};${endLng},${endLat}?overview=full&geometries=geojson`;
+      const response = await fetch(url);
+      if (!response.ok) throw new Error('Failed to compute route');
+      const data = await response.json();
+      if (data.code !== 'Ok' || !data.routes || data.routes.length === 0) throw new Error('No route found');
 
-    const route = data.routes[0];
-    const distanceKm = (route.distance / 1000).toFixed(1);
-    const durationMin = Math.round(route.duration / 60);
-    const pathCoords = route.geometry.coordinates.map(coord => [coord[1], coord[0]]);
-
-    return {
-      distance: parseFloat(distanceKm),
-      duration: durationMin,
-      coordinates: pathCoords
+      const route = data.routes[0];
+      return {
+        distance: parseFloat((route.distance / 1000).toFixed(1)),
+        duration: Math.round(route.duration / 60),
+        coordinates: route.geometry.coordinates.map(c => [c[1], c[0]])
+      };
     };
+
+    if (cache) {
+      const key = cache.routeKey(startLat, startLng, endLat, endLng);
+      const hit = cache.getRoute(key);
+
+      if (hit) {
+        if (hit.isStale && onStaleRefresh) {
+          // Serve stale immediately, silently refresh in background
+          console.debug('[Cache] Stale route hit — serving stale, background refetching:', key);
+          fetchFresh().then(freshRoute => {
+            cache.setRoute(key, freshRoute);
+            onStaleRefresh(freshRoute);
+          }).catch(err => console.warn('[Cache] Background route re-fetch failed:', err));
+        } else {
+          console.debug('[Cache] Fresh route hit:', key);
+        }
+        return hit.route;
+      }
+
+      // Cache miss — fetch and store
+      console.debug('[Cache] Route miss — fetching:', key);
+      const freshRoute = await fetchFresh();
+      cache.setRoute(key, freshRoute);
+      return freshRoute;
+    }
+
+    // No cache provided — plain fetch
+    return fetchFresh();
   }
 
   // Draw polyline route on Map
@@ -268,8 +292,10 @@ export class MapAdapter {
   // Along-the-Route Discovery Methods
   // =============================================
 
-  // Search for POIs along a route corridor using Overpass API
-  async searchPOIsAlongRoute(routeCoordinates, category) {
+  // Search for POIs along a route corridor using Overpass API.
+  // @param {RouteCache|null} cache          - optional L2 cache instance
+  // @param {Function|null}   onStaleRefresh - called with fresh POIs when background re-fetch completes
+  async searchPOIsAlongRoute(routeCoordinates, category, cache = null, onStaleRefresh = null) {
     if (!routeCoordinates || routeCoordinates.length === 0) return [];
 
     // OSM tag mapping for each category
@@ -319,7 +345,8 @@ export class MapAdapter {
 
     let pois = [];
 
-    try {
+    // Inner fetch function — runs the real Overpass API call
+    const fetchFresh = async () => {
       // Route through our own Vercel serverless proxy (/api/overpass).
       // This is necessary because Overpass API requires a custom User-Agent header,
       // which browsers forbid JavaScript from setting, causing a 406 + CORS block.
@@ -330,13 +357,12 @@ export class MapAdapter {
         body: JSON.stringify({ query: overpassQuery })
       });
 
-      if (!res.ok) {
-        throw new Error(`Proxy returned HTTP ${res.status}`);
-      }
+      if (!res.ok) throw new Error(`Proxy returned HTTP ${res.status}`);
 
       const data = await res.json();
+      let results = [];
       if (data && data.elements) {
-        pois = data.elements
+        results = data.elements
           .map(el => {
             const lat = el.lat || (el.center && el.center.lat);
             const lng = el.lon || (el.center && el.center.lon);
@@ -355,16 +381,49 @@ export class MapAdapter {
               osmTags: el.tags || {}
             };
           })
-          .filter(poi => poi !== null && poi.estimatedDetourMin <= 10); // Max 10 min detour
+          .filter(poi => poi !== null && poi.estimatedDetourMin <= 10);
       }
+      return results
+        .sort((a, b) => a.estimatedDetourMin - b.estimatedDetourMin)
+        .slice(0, 8);
+    };
+
+    // ── Cache-aware path ──────────────────────────────────────────────────
+    if (cache) {
+      const key = cache.poiKey(routeCoordinates, category);
+      const hit = cache.getPOIs(key);
+
+      if (hit) {
+        if (hit.isStale && onStaleRefresh) {
+          console.debug('[Cache] Stale POI hit — serving stale, background refetching:', key);
+          fetchFresh().then(freshPOIs => {
+            cache.setPOIs(key, freshPOIs);
+            onStaleRefresh(freshPOIs);
+          }).catch(err => console.warn('[Cache] Background POI re-fetch failed:', err));
+        } else {
+          console.debug('[Cache] Fresh POI hit:', key);
+        }
+        return { pois: hit.pois, fromCache: true };
+      }
+
+      // Cache miss
+      console.debug('[Cache] POI miss — fetching:', key);
+      try {
+        pois = await fetchFresh();
+        cache.setPOIs(key, pois);
+      } catch (err) {
+        console.error('Overpass proxy request failed:', err);
+      }
+      return { pois, fromCache: false };
+    }
+
+    // ── No-cache fallback ────────────────────────────────────────────────
+    try {
+      pois = await fetchFresh();
     } catch (err) {
       console.error('Overpass proxy request failed:', err);
     }
-
-    // Sort and limit
-    return pois
-      .sort((a, b) => a.estimatedDetourMin - b.estimatedDetourMin)
-      .slice(0, 8); // Limit to 8 results
+    return { pois, fromCache: false };
   }
 
   // Estimate detour time for a POI based on distance from nearest route point
@@ -390,27 +449,48 @@ export class MapAdapter {
   }
 
   // Get multi-stop route: pickup → stop → destination via OSRM
-  async getMultiStopRoute(pickupLat, pickupLng, stopLat, stopLng, destLat, destLng) {
-    const url = `https://router.project-osrm.org/route/v1/driving/${pickupLng},${pickupLat};${stopLng},${stopLat};${destLng},${destLat}?overview=full&geometries=geojson`;
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error("Failed to compute multi-stop route");
-    }
-    const data = await response.json();
-    if (data.code !== 'Ok' || !data.routes || data.routes.length === 0) {
-      throw new Error("No multi-stop route found");
-    }
+  // @param {RouteCache|null} cache  - optional L1 cache instance
+  // @param {Function|null}   onStaleRefresh - called with fresh route on background re-fetch
+  async getMultiStopRoute(pickupLat, pickupLng, stopLat, stopLng, destLat, destLng, cache = null, onStaleRefresh = null) {
+    const fetchFresh = async () => {
+      const url = `https://router.project-osrm.org/route/v1/driving/${pickupLng},${pickupLat};${stopLng},${stopLat};${destLng},${destLat}?overview=full&geometries=geojson`;
+      const response = await fetch(url);
+      if (!response.ok) throw new Error('Failed to compute multi-stop route');
+      const data = await response.json();
+      if (data.code !== 'Ok' || !data.routes || data.routes.length === 0) throw new Error('No multi-stop route found');
 
-    const route = data.routes[0];
-    const distanceKm = (route.distance / 1000).toFixed(1);
-    const durationMin = Math.round(route.duration / 60);
-    const pathCoords = route.geometry.coordinates.map(coord => [coord[1], coord[0]]);
-
-    return {
-      distance: parseFloat(distanceKm),
-      duration: durationMin,
-      coordinates: pathCoords
+      const route = data.routes[0];
+      return {
+        distance: parseFloat((route.distance / 1000).toFixed(1)),
+        duration: Math.round(route.duration / 60),
+        coordinates: route.geometry.coordinates.map(c => [c[1], c[0]])
+      };
     };
+
+    if (cache) {
+      const key = cache.multiStopKey(pickupLat, pickupLng, stopLat, stopLng, destLat, destLng);
+      const hit = cache.getRoute(key);
+
+      if (hit) {
+        if (hit.isStale && onStaleRefresh) {
+          console.debug('[Cache] Stale multi-stop route hit — background refetching:', key);
+          fetchFresh().then(freshRoute => {
+            cache.setRoute(key, freshRoute);
+            onStaleRefresh(freshRoute);
+          }).catch(err => console.warn('[Cache] Background multi-stop re-fetch failed:', err));
+        } else {
+          console.debug('[Cache] Fresh multi-stop route hit:', key);
+        }
+        return hit.route;
+      }
+
+      console.debug('[Cache] Multi-stop route miss — fetching:', key);
+      const freshRoute = await fetchFresh();
+      cache.setRoute(key, freshRoute);
+      return freshRoute;
+    }
+
+    return fetchFresh();
   }
 
   // Add a stop marker (separate from the main markers dict since multiple could exist)

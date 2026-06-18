@@ -1833,6 +1833,29 @@ body, html {
   opacity: 0.5;
 }
 
+/* ⚡ Cache-hit instant badge */
+.cache-hit-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  background: rgba(39, 110, 241, 0.12);
+  border: 1px solid rgba(39, 110, 241, 0.25);
+  color: #60a5fa;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  margin-bottom: 8px;
+  align-self: flex-start;
+  opacity: 1;
+  transition: opacity 0.6s ease;
+}
+
+.cache-hit-badge.fade-out {
+  opacity: 0;
+}
+
 /* Stop Added Banner */
 .stop-added-banner {
   display: none;

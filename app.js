@@ -1,5 +1,6 @@
 // app.js
 import { MapAdapter, calculateBearing } from './map-adapter.js';
+import { RouteCache } from './api/cache.js';
 
 // Application State
 const state = {
@@ -14,7 +15,8 @@ const state = {
   driverMarker: null,
   activeRideInterval: null,
   mapAdapter: null,
-  activeInputField: 'destination' // Default to 'destination' on load
+  activeInputField: 'destination', // Default to 'destination' on load
+  cache: new RouteCache()          // Two-level API cache (L1: routes, L2: POIs)
 };
 
 // Helper: Reverse geocode coordinates using Photon Komoot API
@@ -223,12 +225,16 @@ async function handleRouteCalculation() {
   try {
     const route = await state.mapAdapter.getRoute(
       state.pickup.lat, state.pickup.lng,
-      state.destination.lat, state.destination.lng
+      state.destination.lat, state.destination.lng,
+      state.cache
     );
     
     state.route = route;
     state.originalRoute = route; // Cache original route
     state.intermediateStop = null; // Clear stop
+
+    // Invalidate POI cache — new base route means old POI results are irrelevant
+    state.cache.clearPOICache();
 
     // Clear any existing stop markers and UI
     if (state.mapAdapter.removeAllStopMarkers) {
@@ -551,16 +557,7 @@ function getCategoryEmoji(category) {
 async function searchCategory(category) {
   const resultsContainer = document.getElementById('poi-results-container');
   if (!resultsContainer) return;
-  
-  // Render loading state skeleton
-  resultsContainer.innerHTML = `
-    <div class="poi-loading">
-      <div class="poi-skeleton"></div>
-      <div class="poi-skeleton"></div>
-      <div class="poi-skeleton"></div>
-    </div>
-  `;
-  
+
   // Update category pills UI active state
   document.querySelectorAll('.category-pill').forEach(pill => {
     if (pill.dataset.category === category) {
@@ -579,54 +576,32 @@ async function searchCategory(category) {
     `;
     return;
   }
-  
+
+  // Check cache before showing loading skeleton — instant path
+  const cacheKey = state.cache.poiKey(state.originalRoute.coordinates, category);
+  const cacheHit = state.cache.getPOIs(cacheKey);
+
+  if (!cacheHit) {
+    // Cache miss: show loading skeleton while we fetch
+    resultsContainer.innerHTML = `
+      <div class="poi-loading">
+        <div class="poi-skeleton"></div>
+        <div class="poi-skeleton"></div>
+        <div class="poi-skeleton"></div>
+      </div>
+    `;
+  }
+
   try {
-    const pois = await state.mapAdapter.searchPOIsAlongRoute(state.originalRoute.coordinates, category);
+    const { pois, fromCache } = await state.mapAdapter.searchPOIsAlongRoute(
+      state.originalRoute.coordinates,
+      category,
+      state.cache,
+      // onStaleRefresh: silently update results when background refetch completes
+      (freshPOIs) => renderPOIResults(freshPOIs, resultsContainer, category, false)
+    );
     
-    if (pois.length === 0) {
-      resultsContainer.innerHTML = `
-        <div class="poi-empty-state">
-          <div class="empty-icon">😢</div>
-          <div>No spots found along this route. Try another category!</div>
-        </div>
-      `;
-      return;
-    }
-    
-    resultsContainer.innerHTML = '';
-    pois.forEach(poi => {
-      const card = document.createElement('div');
-      card.className = 'poi-result-card';
-      card.innerHTML = `
-        <div class="poi-icon-container">
-          ${getCategoryEmoji(poi.category)}
-        </div>
-        <div class="poi-details">
-          <div class="poi-name" title="${poi.name}">${poi.name}</div>
-          <div class="poi-distance-text">${poi.distanceFromRoute} km from route</div>
-        </div>
-        <div class="detour-badge">
-          <i data-lucide="clock"></i> <span>+${poi.estimatedDetourMin} min</span>
-        </div>
-        <button class="poi-add-btn" title="Add stop">
-          <i data-lucide="plus"></i>
-        </button>
-      `;
-      
-      const addStopHandler = async (e) => {
-        e.stopPropagation();
-        await addIntermediateStop(poi);
-      };
-      
-      card.querySelector('.poi-add-btn').addEventListener('click', addStopHandler);
-      card.addEventListener('click', addStopHandler);
-      
-      resultsContainer.appendChild(card);
-    });
-    
-    if (window.lucide) {
-      window.lucide.createIcons();
-    }
+    renderPOIResults(pois, resultsContainer, category, fromCache);
   } catch (err) {
     console.error("POI search error:", err);
     resultsContainer.innerHTML = `
@@ -635,6 +610,66 @@ async function searchCategory(category) {
         <div>Search failed. Please try again.</div>
       </div>
     `;
+  }
+}
+
+// Render POI result cards into the container
+// fromCache=true shows the ⚡ Instant badge
+function renderPOIResults(pois, resultsContainer, category, fromCache) {
+  if (pois.length === 0) {
+    resultsContainer.innerHTML = `
+      <div class="poi-empty-state">
+        <div class="empty-icon">😢</div>
+        <div>No spots found along this route. Try another category!</div>
+      </div>
+    `;
+    return;
+  }
+
+  resultsContainer.innerHTML = '';
+
+  // ⚡ Instant badge — shown for cache hits, fades out after 2s
+  if (fromCache) {
+    const badge = document.createElement('div');
+    badge.className = 'cache-hit-badge';
+    badge.innerHTML = '⚡ Instant';
+    resultsContainer.appendChild(badge);
+    setTimeout(() => badge.classList.add('fade-out'), 1500);
+    setTimeout(() => badge.remove(), 2200);
+  }
+
+  pois.forEach(poi => {
+    const card = document.createElement('div');
+    card.className = 'poi-result-card';
+    card.innerHTML = `
+      <div class="poi-icon-container">
+        ${getCategoryEmoji(poi.category)}
+      </div>
+      <div class="poi-details">
+        <div class="poi-name" title="${poi.name}">${poi.name}</div>
+        <div class="poi-distance-text">${poi.distanceFromRoute} km from route</div>
+      </div>
+      <div class="detour-badge">
+        <i data-lucide="clock"></i> <span>+${poi.estimatedDetourMin} min</span>
+      </div>
+      <button class="poi-add-btn" title="Add stop">
+        <i data-lucide="plus"></i>
+      </button>
+    `;
+    
+    const addStopHandler = async (e) => {
+      e.stopPropagation();
+      await addIntermediateStop(poi);
+    };
+    
+    card.querySelector('.poi-add-btn').addEventListener('click', addStopHandler);
+    card.addEventListener('click', addStopHandler);
+    
+    resultsContainer.appendChild(card);
+  });
+  
+  if (window.lucide) {
+    window.lucide.createIcons();
   }
 }
 
@@ -648,7 +683,8 @@ async function addIntermediateStop(poi) {
     const multiStopRoute = await state.mapAdapter.getMultiStopRoute(
       state.pickup.lat, state.pickup.lng,
       poi.lat, poi.lng,
-      state.destination.lat, state.destination.lng
+      state.destination.lat, state.destination.lng,
+      state.cache
     );
     
     state.intermediateStop = {
@@ -753,6 +789,9 @@ function resetRideState() {
   state.originalRoute = null;
   state.intermediateStop = null;
   state.selectedVehicle = null;
+
+  // Clear all caches on full reset
+  state.cache.clearAll();
   
   const stopBanner = document.getElementById('stop-added-banner');
   if (stopBanner) stopBanner.classList.remove('visible');
