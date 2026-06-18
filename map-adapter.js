@@ -245,14 +245,27 @@ export class MapAdapter {
   }
 
   // Autocomplete place suggestions via Photon Komoot search API (highly performant search-as-you-type)
-  async searchPlaces(query) {
+  async searchPlaces(query, biasLat = null, biasLng = null) {
     if (!query || query.trim().length < 3) return [];
     const sanitizedQuery = query.substring(0, 40);
 
+    let lat = biasLat;
+    let lng = biasLng;
+
+    if (lat === null || lng === null) {
+      if (this.map) {
+        const center = this.map.getCenter();
+        lat = center.lat;
+        lng = center.lng;
+      } else {
+        lat = 12.9716;
+        lng = 77.5946;
+      }
+    }
+
     try {
-      // Restrict results strictly to Bangalore Metropolitan Area (BBox: 77.30, 12.70, 77.90, 13.25)
-      // and bias results toward central Bangalore [12.9716, 77.5946]
-      const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(sanitizedQuery)}&limit=5&lat=12.9716&lon=77.5946&bbox=77.30,12.70,77.90,13.25`;
+      // Bias results toward the resolved location (no strict bbox limit to support dynamic city usage)
+      const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(sanitizedQuery)}&limit=5&lat=${lat}&lon=${lng}`;
       const res = await fetch(url);
       if (res.ok) {
         const data = await res.json();

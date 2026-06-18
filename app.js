@@ -975,7 +975,7 @@ async function initApp() {
       return;
     }
 
-    const results = await state.mapAdapter.searchPlaces(inputVal);
+    const results = await state.mapAdapter.searchPlaces(inputVal, state.pickup.lat, state.pickup.lng);
     
     if (results.length === 0) {
       suggestionsList.classList.add('hidden');
