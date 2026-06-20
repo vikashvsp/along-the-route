@@ -2,15 +2,6 @@
 import { MapAdapter, calculateBearing } from './map-adapter.js';
 import { RouteCache } from './api/cache.js';
 
-// Utility: debounce — delays fn until after `wait` ms of inactivity
-function debounce(fn, wait) {
-  let timer;
-  return function (...args) {
-    clearTimeout(timer);
-    timer = setTimeout(() => fn.apply(this, args), wait);
-  };
-}
-
 // Application State
 const state = {
   currentStep: 'search', // 'search' | 'select-ride' | 'matching' | 'active-ride' | 'completed'
