@@ -305,101 +305,105 @@ export class MapAdapter {
   // Along-the-Route Discovery Methods
   // =============================================
 
-  // Search for POIs along a route corridor using Overpass API.
-  // @param {RouteCache|null} cache          - optional L2 cache instance
-  // @param {Function|null}   onStaleRefresh - called with fresh POIs when background re-fetch completes
-  async searchPOIsAlongRoute(routeCoordinates, category, cache = null, onStaleRefresh = null) {
-    if (!routeCoordinates || routeCoordinates.length === 0) return [];
+  // Split route coordinate array into n roughly-equal segments.
+  // Short routes that can't fill n segments degrade gracefully (fewer returned).
+  _splitRouteIntoSegments(coords, n = 3) {
+    if (coords.length < n) return [coords]; // too short — treat as one segment
+    const size = Math.ceil(coords.length / n);
+    return Array.from({ length: n }, (_, i) =>
+      coords.slice(i * size, Math.min((i + 1) * size, coords.length))
+    ).filter(seg => seg.length > 0);
+  }
 
-    // OSM tag mapping for each category
-    const categoryTags = {
-      'florist':      ['shop=florist'],
-      'cafe':         ['amenity=cafe'],
-      'restaurant':   ['amenity=restaurant'],
-      'pharmacy':     ['amenity=pharmacy'],
-      'grocery':      ['shop=supermarket', 'shop=convenience'],
-      'gift':         ['shop=gift']
-    };
-
-    const tags = categoryTags[category];
-    if (!tags) return [];
-
-    // Compute bounding box of the route corridor with ~800m buffer
+  // Compute a bounding box for a coordinate segment with ~800m buffer.
+  _bboxForCoords(coords) {
     const BUFFER = 0.008; // ~800m in degrees
-    let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
-    
-    routeCoordinates.forEach(coord => {
-      // coords are [lat, lng]
-      if (coord[0] < minLat) minLat = coord[0];
-      if (coord[0] > maxLat) maxLat = coord[0];
-      if (coord[1] < minLng) minLng = coord[1];
-      if (coord[1] > maxLng) maxLng = coord[1];
+    let minLat = Infinity, maxLat = -Infinity;
+    let minLng = Infinity, maxLng = -Infinity;
+    coords.forEach(([lat, lng]) => {
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+      if (lng < minLng) minLng = lng;
+      if (lng > maxLng) maxLng = lng;
     });
+    return {
+      minLat: minLat - BUFFER,
+      maxLat: maxLat + BUFFER,
+      minLng: minLng - BUFFER,
+      maxLng: maxLng + BUFFER,
+    };
+  }
 
-    minLat -= BUFFER;
-    maxLat += BUFFER;
-    minLng -= BUFFER;
-    maxLng += BUFFER;
-
-    // Build Overpass QL query
-    const bbox = `${minLat},${minLng},${maxLat},${maxLng}`;
+  // Build an Overpass QL query string for a set of tags within a bbox.
+  _buildOverpassQuery(tags, bbox) {
+    const { minLat, minLng, maxLat, maxLng } = bbox;
+    const bboxStr = `${minLat},${minLng},${maxLat},${maxLng}`;
     const tagQueries = tags.map(tag => {
       const [key, value] = tag.split('=');
-      return `node["${key}"="${value}"](${bbox});\nway["${key}"="${value}"](${bbox});`;
+      return `node["${key}"="${value}"](${bboxStr});\nway["${key}"="${value}"](${bboxStr});`;
     }).join('\n');
+    return `[out:json][timeout:10];\n(\n${tagQueries}\n);\nout center 20;`;
+  }
 
-    const overpassQuery = `
-      [out:json][timeout:8];
-      (
-        ${tagQueries}
-      );
-      out center 25;
-    `;
+  // Parse raw Overpass elements into clean POI objects.
+  // Returns an array of POI objects (nulls filtered out) without detour > 10 min.
+  _parseOverpassElements(elements, category, routeCoordinates) {
+    if (!elements || !elements.length) return [];
+    return elements
+      .map(el => {
+        const lat = el.lat || (el.center && el.center.lat);
+        const lng = el.lon || (el.center && el.center.lon);
+        if (!lat || !lng) return null;
+        const name = (el.tags && el.tags.name) || 'Unnamed';
+        const detourInfo = this._estimateDetour(lat, lng, routeCoordinates);
+        return {
+          osmId: String(el.id),         // used for cross-segment deduplication
+          name,
+          lat,
+          lng,
+          category,
+          distanceFromRoute: detourInfo.distanceKm,
+          estimatedDetourMin: detourInfo.estimatedMinutes,
+          osmTags: el.tags || {}
+        };
+      })
+      .filter(poi => poi !== null && poi.estimatedDetourMin <= 10);
+  }
 
-    let pois = [];
+  // Search for POIs along a route corridor using Overpass API.
+  //
+  // Progressive batching:
+  //   The route is split into 3 geographic segments. One Overpass query fires
+  //   per segment, all in parallel. As each resolves, onBatchReady() is called
+  //   immediately so the UI can show results before all segments finish.
+  //
+  // @param {RouteCache|null} cache          - optional L2 cache instance
+  // @param {Function|null}   onStaleRefresh - called with fresh POIs when stale entry re-fetched
+  // @param {Function|null}   onBatchReady   - (newPOIs, allSoFar, isLastBatch) => void
+  // @param {AbortSignal|null} signal        - AbortController signal to cancel in-flight requests
+  async searchPOIsAlongRoute(
+    routeCoordinates,
+    category,
+    cache = null,
+    onStaleRefresh = null,
+    onBatchReady = null,
+    signal = null
+  ) {
+    if (!routeCoordinates || routeCoordinates.length === 0) {
+      return { pois: [], fromCache: false };
+    }
 
-    // Inner fetch function — runs the real Overpass API call
-    const fetchFresh = async () => {
-      // Route through our own Vercel serverless proxy (/api/overpass).
-      // This is necessary because Overpass API requires a custom User-Agent header,
-      // which browsers forbid JavaScript from setting, causing a 406 + CORS block.
-      // The proxy runs server-side where there are no such restrictions.
-      const res = await fetch('/api/overpass', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: overpassQuery })
-      });
-
-      if (!res.ok) throw new Error(`Proxy returned HTTP ${res.status}`);
-
-      const data = await res.json();
-      let results = [];
-      if (data && data.elements) {
-        results = data.elements
-          .map(el => {
-            const lat = el.lat || (el.center && el.center.lat);
-            const lng = el.lon || (el.center && el.center.lon);
-            if (!lat || !lng) return null;
-
-            const name = (el.tags && el.tags.name) || 'Unnamed';
-            const detourInfo = this._estimateDetour(lat, lng, routeCoordinates);
-
-            return {
-              name: name,
-              lat: lat,
-              lng: lng,
-              category: category,
-              distanceFromRoute: detourInfo.distanceKm,
-              estimatedDetourMin: detourInfo.estimatedMinutes,
-              osmTags: el.tags || {}
-            };
-          })
-          .filter(poi => poi !== null && poi.estimatedDetourMin <= 10);
-      }
-      return results
-        .sort((a, b) => a.estimatedDetourMin - b.estimatedDetourMin)
-        .slice(0, 8);
+    // OSM tag mapping per category
+    const categoryTags = {
+      'florist':    ['shop=florist'],
+      'cafe':       ['amenity=cafe'],
+      'restaurant': ['amenity=restaurant'],
+      'pharmacy':   ['amenity=pharmacy'],
+      'grocery':    ['shop=supermarket', 'shop=convenience'],
+      'gift':       ['shop=gift']
     };
+    const tags = categoryTags[category];
+    if (!tags) return { pois: [], fromCache: false };
 
     // ── Cache-aware path ──────────────────────────────────────────────────
     if (cache) {
@@ -409,35 +413,123 @@ export class MapAdapter {
       if (hit) {
         if (hit.isStale && onStaleRefresh) {
           console.debug('[Cache] Stale POI hit — serving stale, background refetching:', key);
-          fetchFresh().then(freshPOIs => {
-            cache.setPOIs(key, freshPOIs);
-            onStaleRefresh(freshPOIs);
-          }).catch(err => console.warn('[Cache] Background POI re-fetch failed:', err));
+          // Background re-fetch also uses the batched path (no onBatchReady — silent)
+          this._fetchPOIsBatched(routeCoordinates, tags, category, null, signal)
+            .then(freshPOIs => {
+              cache.setPOIs(key, freshPOIs);
+              onStaleRefresh(freshPOIs);
+            })
+            .catch(err => {
+              if (err.name !== 'AbortError') {
+                console.warn('[Cache] Background POI re-fetch failed:', err);
+              }
+            });
         } else {
           console.debug('[Cache] Fresh POI hit:', key);
         }
         return { pois: hit.pois, fromCache: true };
       }
 
-      // Cache miss
-      console.debug('[Cache] POI miss — fetching:', key);
+      // Cache miss — fetch with batching
+      console.debug('[Cache] POI miss — fetching (batched):', key);
       try {
-        pois = await fetchFresh();
+        const pois = await this._fetchPOIsBatched(routeCoordinates, tags, category, onBatchReady, signal);
         cache.setPOIs(key, pois);
+        return { pois, fromCache: false };
       } catch (err) {
-        console.error('Overpass proxy request failed:', err);
+        if (err.name === 'AbortError') throw err; // re-throw so caller can detect cancellation
+        console.error('Batched Overpass request failed:', err);
+        return { pois: [], fromCache: false };
       }
-      return { pois, fromCache: false };
     }
 
     // ── No-cache fallback ────────────────────────────────────────────────
     try {
-      pois = await fetchFresh();
+      const pois = await this._fetchPOIsBatched(routeCoordinates, tags, category, onBatchReady, signal);
+      return { pois, fromCache: false };
     } catch (err) {
-      console.error('Overpass proxy request failed:', err);
+      if (err.name === 'AbortError') throw err;
+      console.error('Batched Overpass request failed (no cache):', err);
+      return { pois: [], fromCache: false };
     }
-    return { pois, fromCache: false };
   }
+
+  // Internal: fire 3 parallel Overpass queries (one per route segment) and
+  // progressively call onBatchReady() as each resolves.
+  // Returns the final merged + sorted + sliced list when all 3 settle.
+  async _fetchPOIsBatched(routeCoordinates, tags, category, onBatchReady, signal) {
+    const segments = this._splitRouteIntoSegments(routeCoordinates, 3);
+    const seenIds = new Set();   // cross-segment deduplication by OSM element ID
+    const allPOIs = [];          // accumulates results across batches
+    let totalSettled = 0;        // increments on BOTH success and failure
+
+    // Build one promise per segment. We don't await them sequentially —
+    // each .then() fires as soon as that segment resolves, enabling progressive UI updates.
+    const segmentPromises = segments.map((segCoords, idx) => {
+      const bbox = this._bboxForCoords(segCoords);
+      const query = this._buildOverpassQuery(tags, bbox);
+
+      return fetch('/api/overpass', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query }),
+        signal,                  // honours AbortController from caller
+      })
+        .then(res => {
+          if (!res.ok) throw new Error(`Segment ${idx + 1}: proxy returned HTTP ${res.status}`);
+          return res.json();
+        })
+        .then(data => {
+          totalSettled++;
+          const parsed = this._parseOverpassElements(data.elements, category, routeCoordinates);
+
+          // Deduplicate: only keep POIs whose OSM ID we haven't seen yet
+          const newPOIs = parsed.filter(poi => {
+            if (seenIds.has(poi.osmId)) return false;
+            seenIds.add(poi.osmId);
+            return true;
+          });
+
+          allPOIs.push(...newPOIs);
+
+          const isLastBatch = (totalSettled === segments.length);
+          if (onBatchReady && (newPOIs.length > 0 || isLastBatch)) {
+            onBatchReady(newPOIs, [...allPOIs], isLastBatch);
+          }
+
+          console.debug(`[Batched] Segment ${idx + 1}/${segments.length} resolved — ${newPOIs.length} new POIs`);
+          return newPOIs;
+        })
+        .catch(err => {
+          // Count failures toward totalSettled so isLastBatch is accurate
+          totalSettled++;
+          const isLastBatch = (totalSettled === segments.length);
+          if (err.name !== 'AbortError') {
+            console.warn(`[Batched] Segment ${idx + 1} failed:`, err.message);
+            // If this was the last segment settling, finalize UI state
+            if (onBatchReady && isLastBatch && allPOIs.length > 0) {
+              onBatchReady([], [...allPOIs], true);
+            }
+          }
+          throw err; // re-throw so allSettled captures it
+        });
+    });
+
+    // Promise.allSettled so one failed segment doesn't kill the others.
+    // (AbortError rejections are captured here — we check signal.aborted to propagate cleanly)
+    await Promise.allSettled(segmentPromises);
+
+    // If the controller was aborted, propagate so the caller can discard cleanly
+    if (signal && signal.aborted) {
+      throw new DOMException('POI search aborted', 'AbortError');
+    }
+
+    // Final sort by detour, cap at 8
+    return allPOIs
+      .sort((a, b) => a.estimatedDetourMin - b.estimatedDetourMin)
+      .slice(0, 8);
+  }
+
 
   // Estimate detour time for a POI based on distance from nearest route point
   _estimateDetour(poiLat, poiLng, routeCoordinates) {

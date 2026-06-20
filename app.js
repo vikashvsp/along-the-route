@@ -2,6 +2,15 @@
 import { MapAdapter, calculateBearing } from './map-adapter.js';
 import { RouteCache } from './api/cache.js';
 
+// Utility: debounce — delays fn until after `wait` ms of inactivity
+function debounce(fn, wait) {
+  let timer;
+  return function (...args) {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn.apply(this, args), wait);
+  };
+}
+
 // Application State
 const state = {
   currentStep: 'search', // 'search' | 'select-ride' | 'matching' | 'active-ride' | 'completed'
@@ -17,7 +26,9 @@ const state = {
   mapAdapter: null,
   activeInputField: 'destination', // Default to 'destination' on load
   cache: new RouteCache(),         // Two-level API cache (L1: routes, L2: POIs)
-  _lastKnownLocation: null         // User's last GPS fix — used to reset map to correct city
+  _lastKnownLocation: null,        // User's last GPS fix — used to reset map to correct city
+  _poiAbortController: null,       // AbortController for current in-flight POI search
+  _poiSearchToken: 0               // Monotonic counter — guards against stale batch callbacks
 };
 
 // Helper: Reverse geocode coordinates using Photon Komoot API
@@ -559,15 +570,24 @@ async function searchCategory(category) {
   const resultsContainer = document.getElementById('poi-results-container');
   if (!resultsContainer) return;
 
-  // Update category pills UI active state
+  // ── 1. Abort any in-flight request from a previous category ──────────
+  if (state._poiAbortController) {
+    state._poiAbortController.abort();
+  }
+  const controller = new AbortController();
+  state._poiAbortController = controller;
+
+  // ── 2. Monotonic token — batch callbacks check this before writing to UI ──
+  const token = ++state._poiSearchToken;
+
+  // ── 3. Pill visual state: mark selected as loading, rest as default ───
   document.querySelectorAll('.category-pill').forEach(pill => {
+    pill.classList.remove('active', 'loading', 'error');
     if (pill.dataset.category === category) {
-      pill.classList.add('active');
-    } else {
-      pill.classList.remove('active');
+      pill.classList.add('loading');
     }
   });
-  
+
   if (!state.originalRoute || !state.originalRoute.coordinates) {
     resultsContainer.innerHTML = `
       <div class="poi-empty-state">
@@ -575,59 +595,170 @@ async function searchCategory(category) {
         <div>No route found. Please set your pickup and destination.</div>
       </div>
     `;
+    setPillState(category, 'error');
     return;
   }
 
-  // Check cache before showing loading skeleton — instant path
+  // ── 4. Cache check — instant path skips batching entirely ─────────────
   const cacheKey = state.cache.poiKey(state.originalRoute.coordinates, category);
   const cacheHit = state.cache.getPOIs(cacheKey);
   const infoBanner = document.getElementById('poi-info-banner');
 
-  if (!cacheHit) {
-    // Cache miss: show loading skeleton while we fetch
-    resultsContainer.innerHTML = `
-      <div class="poi-loading">
-        <div class="poi-skeleton"></div>
-        <div class="poi-skeleton"></div>
-        <div class="poi-skeleton"></div>
-      </div>
-    `;
-    if (infoBanner) {
-      infoBanner.classList.remove('hidden');
+  if (cacheHit) {
+    if (infoBanner) infoBanner.classList.add('hidden');
+    setPillState(category, 'active');
+    renderPOIResults(cacheHit.pois, resultsContainer, category, true);
+    // Stale-while-revalidate — background silent refresh handled inside searchPOIsAlongRoute
+    if (cacheHit.isStale) {
+      state.mapAdapter.searchPOIsAlongRoute(
+        state.originalRoute.coordinates, category, state.cache,
+        (freshPOIs) => {
+          if (token !== state._poiSearchToken) return;
+          renderPOIResults(freshPOIs, resultsContainer, category, false);
+        },
+        null, controller.signal
+      ).catch(() => {});
     }
-  } else {
-    if (infoBanner) {
-      infoBanner.classList.add('hidden');
-    }
+    return;
   }
 
+  // ── 5. Cache miss — show skeleton + patience banner ───────────────────
+  resultsContainer.innerHTML = `
+    <div class="poi-loading">
+      <div class="poi-skeleton"></div>
+      <div class="poi-skeleton"></div>
+      <div class="poi-skeleton"></div>
+    </div>
+  `;
+  if (infoBanner) infoBanner.classList.remove('hidden');
+
+  // ── 6. Batched progressive fetch ──────────────────────────────────────
+  let isFirstBatch = true;
+
+  const onBatchReady = (newPOIs, allSoFar, isLastBatch) => {
+    // Guard: discard if user already switched to another category
+    if (token !== state._poiSearchToken) return;
+
+    if (infoBanner) infoBanner.classList.add('hidden');
+    appendPOICards(newPOIs, resultsContainer, category, isFirstBatch, !isLastBatch);
+    isFirstBatch = false;
+
+    if (isLastBatch) {
+      setPillState(category, 'active');
+    }
+  };
+
   try {
-    const { pois, fromCache } = await state.mapAdapter.searchPOIsAlongRoute(
+    await state.mapAdapter.searchPOIsAlongRoute(
       state.originalRoute.coordinates,
       category,
       state.cache,
-      // onStaleRefresh: silently update results when background refetch completes
-      (freshPOIs) => {
-        if (infoBanner) infoBanner.classList.add('hidden');
-        renderPOIResults(freshPOIs, resultsContainer, category, false);
-      }
+      // onStaleRefresh (background silent re-fetch after cache hit — not used here since we had a miss)
+      null,
+      onBatchReady,
+      controller.signal
     );
-    
-    if (infoBanner) {
-      infoBanner.classList.add('hidden');
+
+    // If all batches came back empty (no onBatchReady fired with results)
+    if (token === state._poiSearchToken && isFirstBatch) {
+      if (infoBanner) infoBanner.classList.add('hidden');
+      setPillState(category, 'active');
+      resultsContainer.innerHTML = `
+        <div class="poi-empty-state">
+          <div class="empty-icon">😢</div>
+          <div>No spots found along this route. Try another category!</div>
+        </div>
+      `;
     }
-    renderPOIResults(pois, resultsContainer, category, fromCache);
   } catch (err) {
-    console.error("POI search error:", err);
-    if (infoBanner) {
-      infoBanner.classList.add('hidden');
+    if (err.name === 'AbortError') {
+      // User switched categories — silently discard, new search will take over
+      console.debug('[searchCategory] Aborted:', category);
+      return;
     }
+    console.error('POI search error:', err);
+    if (token !== state._poiSearchToken) return;
+    if (infoBanner) infoBanner.classList.add('hidden');
+    setPillState(category, 'error');
     resultsContainer.innerHTML = `
       <div class="poi-empty-state">
         <div class="empty-icon">⚠️</div>
         <div>Search failed. Please try again.</div>
       </div>
     `;
+  }
+}
+
+// Helper: set a category pill's visual state
+function setPillState(category, state) {
+  document.querySelectorAll('.category-pill').forEach(pill => {
+    if (pill.dataset.category === category) {
+      pill.classList.remove('active', 'loading', 'error');
+      if (state) pill.classList.add(state);
+    }
+  });
+}
+
+// Append a batch of new POI cards progressively to the results container.
+// isFirstBatch=true clears the skeleton loader before appending.
+// showLoader=true adds a 3-dot "loading more" indicator at the bottom.
+function appendPOICards(newPOIs, container, category, isFirstBatch, showLoader) {
+  if (!newPOIs || newPOIs.length === 0) return;
+
+  if (isFirstBatch) {
+    // Replace skeleton with first real results
+    container.innerHTML = '';
+  } else {
+    // Remove any existing batch loader before appending more cards
+    const existingLoader = container.querySelector('.poi-batch-loader');
+    if (existingLoader) existingLoader.remove();
+  }
+
+  newPOIs.forEach((poi, i) => {
+    const card = document.createElement('div');
+    card.className = 'poi-result-card entering';
+    // Stagger the entrance animation
+    card.style.animationDelay = `${i * 60}ms`;
+    card.innerHTML = `
+      <div class="poi-icon-container">
+        ${getCategoryEmoji(poi.category)}
+      </div>
+      <div class="poi-details">
+        <div class="poi-name" title="${poi.name}">${poi.name}</div>
+        <div class="poi-distance-text">${poi.distanceFromRoute} km from route</div>
+      </div>
+      <div class="detour-badge">
+        <i data-lucide="clock"></i> <span>+${poi.estimatedDetourMin} min</span>
+      </div>
+      <button class="poi-add-btn" title="Add stop">
+        <i data-lucide="plus"></i>
+      </button>
+    `;
+
+    const addStopHandler = async (e) => {
+      e.stopPropagation();
+      await addIntermediateStop(poi);
+    };
+    card.querySelector('.poi-add-btn').addEventListener('click', addStopHandler);
+    card.addEventListener('click', addStopHandler);
+
+    container.appendChild(card);
+  });
+
+  // Add 3-dot batch loader if more batches are pending
+  if (showLoader) {
+    const loader = document.createElement('div');
+    loader.className = 'poi-batch-loader';
+    loader.innerHTML = `
+      <span class="poi-batch-dot"></span>
+      <span class="poi-batch-dot"></span>
+      <span class="poi-batch-dot"></span>
+    `;
+    container.appendChild(loader);
+  }
+
+  if (window.lucide) {
+    window.lucide.createIcons();
   }
 }
 
@@ -1194,12 +1325,11 @@ async function initApp() {
     });
   }
   
-  // Category Pill Clicks
+  // Category Pill Clicks — debounced 300ms to prevent rapid-switching from firing multiple requests
   document.querySelectorAll('.category-pill').forEach(pill => {
-    pill.addEventListener('click', () => {
-      const category = pill.dataset.category;
-      searchCategory(category);
-    });
+    pill.addEventListener('click', debounce(() => {
+      searchCategory(pill.dataset.category);
+    }, 300));
   });
   
   // Set initial step layout view
