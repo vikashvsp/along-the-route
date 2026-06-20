@@ -430,17 +430,39 @@ export class MapAdapter {
         return { pois: hit.pois, fromCache: true };
       }
 
-      // Cache miss — fetch with batching
+      // Cache miss — fetch with batching.
+      // We wrap onBatchReady to track accumulated POIs locally so we can
+      // persist them even if the user switches categories mid-fetch (AbortError).
       console.debug('[Cache] POI miss — fetching (batched):', key);
+      let _latestAccumulated = [];
+      const wrappedOnBatchReady = onBatchReady
+        ? (newPOIs, allSoFar, isLastBatch) => {
+            _latestAccumulated = allSoFar; // keep latest snapshot
+            onBatchReady(newPOIs, allSoFar, isLastBatch);
+          }
+        : (_, allSoFar) => { _latestAccumulated = allSoFar; };
+
       try {
-        const pois = await this._fetchPOIsBatched(routeCoordinates, tags, category, onBatchReady, signal);
+        const pois = await this._fetchPOIsBatched(routeCoordinates, tags, category, wrappedOnBatchReady, signal);
         cache.setPOIs(key, pois);
         return { pois, fromCache: false };
       } catch (err) {
-        if (err.name === 'AbortError') throw err; // re-throw so caller can detect cancellation
+        if (err.name === 'AbortError') {
+          // User switched categories — but persist whatever segments already resolved.
+          // This way coming back to this category shows cached partial results instantly.
+          if (_latestAccumulated.length > 0) {
+            const partialSorted = [..._latestAccumulated]
+              .sort((a, b) => a.estimatedDetourMin - b.estimatedDetourMin)
+              .slice(0, 8);
+            cache.setPOIs(key, partialSorted);
+            console.debug('[Cache] Partial POI results cached on abort:', partialSorted.length, 'POIs for', key);
+          }
+          throw err; // still re-throw so caller knows it was cancelled
+        }
         console.error('Batched Overpass request failed:', err);
         return { pois: [], fromCache: false };
       }
+
     }
 
     // ── No-cache fallback ────────────────────────────────────────────────
